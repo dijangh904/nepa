@@ -21,7 +21,7 @@ export class BillingService {
       include: { user: true }
     });
 
-    await notificationService.sendBillCreated(bill.user.email, bill);
+    await notificationService.sendBillCreated(bill.userId, bill);
     return bill;
   }
 
@@ -50,7 +50,7 @@ export class BillingService {
         }
       });
 
-      await notificationService.sendBillOverdue(bill.user.email, bill, lateFeeAmount);
+      await notificationService.sendBillOverdue(bill.userId, bill, lateFeeAmount);
     }
   }
 

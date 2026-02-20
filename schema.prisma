@@ -23,10 +23,13 @@ model User {
   id        String    @id @default(uuid())
   email     String    @unique
   name      String?
+  phoneNumber String?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   bills     Bill[]
   payments  Payment[]
+  notificationPreference NotificationPreference?
+  notificationLogs       NotificationLog[]
 
   @@index([email])
 }
@@ -92,4 +95,24 @@ model Payment {
   @@index([billId])
   @@index([userId])
   @@index([transactionId])
+}
+
+model NotificationPreference {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  email     Boolean  @default(true)
+  sms       Boolean  @default(false)
+  push      Boolean  @default(false)
+  user      User     @relation(fields: [userId], references: [id])
+}
+
+model NotificationLog {
+  id           String   @id @default(uuid())
+  userId       String
+  type         String
+  status       String
+  message      String?
+  scheduledFor DateTime?
+  createdAt    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id])
 }
