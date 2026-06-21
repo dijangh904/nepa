@@ -7,6 +7,14 @@ import { invalidateUserCache } from '../middleware/cache';
 const prisma = new PrismaClient();
 
 // Validation schemas
+const idParamSchema = Joi.object({
+  id: Joi.string().uuid().required()
+});
+
+const sessionIdParamSchema = Joi.object({
+  sessionId: Joi.string().uuid().required()
+});
+
 const updateProfileSchema = Joi.object({
   name: Joi.string().min(1).max(100).optional(),
   username: Joi.string().alphanum().min(3).max(30).optional(),
@@ -124,7 +132,14 @@ export class UserController {
 
   async getUserById(req: Request, res: Response) {
     try {
-      const { id } = req.params;
+      const { error, value } = idParamSchema.validate(req.params, { abortEarly: false });
+      if (error) {
+        return res.status(400).json({ 
+          error: 'Validation failed', 
+          details: error.details.map(detail => detail.message) 
+        });
+      }
+      const { id } = value;
 
       const user = await prisma.user.findUnique({
         where: { id },
@@ -420,7 +435,14 @@ export class UserController {
 
   async deleteUser(req: Request, res: Response) {
     try {
-      const { id } = req.params;
+      const { error, value } = idParamSchema.validate(req.params, { abortEarly: false });
+      if (error) {
+        return res.status(400).json({ 
+          error: 'Validation failed', 
+          details: error.details.map(detail => detail.message) 
+        });
+      }
+      const { id } = value;
       const currentUser = (req as any).user;
 
       // Users can only delete themselves, admins can delete other users, super admins can delete anyone
