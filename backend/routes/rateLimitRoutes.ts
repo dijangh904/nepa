@@ -17,7 +17,12 @@ import {
   ipBasedRateLimiter,
   progressiveRateLimiter,
   rateLimitBreachMonitor,
-  getRateLimitAnalytics as getComprehensiveAnalytics
+  getRateLimitAnalytics as getComprehensiveAnalytics,
+  scheduledPaymentLimiter,
+  webhookLimiter,
+  fileUploadLimiter,
+  exportLimiter,
+  downloadLimiter
 } from '../middleware/comprehensiveRateLimiter';
 import { 
   getRateLimitAnalytics,
@@ -59,6 +64,11 @@ export function setupRateLimitRoutes(app: any) {
   // Apply specific rate limiters to endpoints
   app.use('/api/auth', authEndpointLimiter);
   app.use('/api/payment', paymentEndpointLimiter);
+  app.use('/api/scheduled-payments', scheduledPaymentLimiter);
+  app.use('/api/webhook', webhookLimiter);
+  app.use('/api/documents/upload', fileUploadLimiter);
+  app.use('/api/export', exportLimiter);
+  app.use('/api/export/download', downloadLimiter);
   app.use('/api', strictApiLimiter);
 
   // Rate limiting analytics endpoints
