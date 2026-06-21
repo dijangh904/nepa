@@ -86,3 +86,6 @@ prisma/migrations/**/migration.sql.bak
 .npm
 .eslintcache
 .node_repl_history
+
+# Pull request drafts
+pr-*.md
