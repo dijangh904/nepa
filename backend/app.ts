@@ -45,10 +45,6 @@ import { initializeCacheSystem } from './services/cache/CacheInitializer';
 
 const app = express();
 
-// Temporarily comment out controllers to get server running
-// const authController = new AuthenticationController();
-// const userController = new UserController();
-
 // Initialize Connection Pool Manager
 ConnectionPoolManager.startHealthMonitoring(60000); // Monitor every minute
 
@@ -121,8 +117,8 @@ app.use('/api', progressiveLimiter);
 app.use(abuseDetector);
 
 // 10. Setup rate limiting routes
-// Temporarily commented out to get server running
-// setupRateLimitRoutes(app);
+import { setupRateLimitRoutes } from './routes/rateLimitRoutes';
+setupRateLimitRoutes(app);
 
 // 11. Rate limiting monitoring endpoint
 app.get('/api/monitoring/rate-limit', getRateLimitStatus);
