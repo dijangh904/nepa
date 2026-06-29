@@ -134,7 +134,6 @@ async recordBreach(breach: RateLimitBreach): Promise<void> {
     const alerts = await this.redis.lrange('rl:alerts', 0, limit - 1);
     return alerts.map(a => JSON.parse(a));
   }
-}
 
   async getMetrics(): Promise<RateLimitMetrics> {
     const total = await this.redis.get('rl:metrics:total') || '0';
@@ -245,7 +244,7 @@ export const getRateLimitStatus = async (req: Request, res: Response) => {
 
 export const checkRateLimitHealth = async () => {
   try {
-    await this.redis.ping();
+    await redis.ping();
     return { healthy: true };
   } catch {
     return { healthy: false };

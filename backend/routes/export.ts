@@ -9,11 +9,13 @@ import {
 } from '../controllers/ExportController';
 import { authenticateToken } from '../middleware/auth';
 import { exportLimiter, downloadLimiter } from '../middleware/comprehensiveRateLimiter';
+import { sanitizeInput } from '../middleware/inputSanitization';
 
 const router = Router();
 
 // Apply authentication to all export routes
 router.use(authenticateToken);
+router.use(sanitizeInput);
 
 // Export routes
 router.post('/', exportLimiter, startExport);
