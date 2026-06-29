@@ -2,7 +2,10 @@ import { Request, Response } from 'express';
 import { PrismaClient, UserStatus, UserRole } from '@prisma/client';
 import Joi from 'joi';
 import bcrypt from 'bcryptjs';
-import { invalidateUserCache } from '../middleware/cache';
+import { invalidateUserCache, invalidateCacheByPattern, GraphQLCache, CachePresets } from '../middleware/cache';
+
+// User profile cache (in-memory, TTL 5 minutes)
+const userCache = new GraphQLCache({ ...CachePresets.production, ttl: 300 });
 
 const prisma = new PrismaClient();
 
@@ -141,6 +144,13 @@ export class UserController {
       }
       const { id } = value;
 
+      // Cache read-through for user profiles
+      const cacheKey = `user:${id}:profile`;
+      const cached = await userCache.get<{ user: any }>(cacheKey);
+      if (cached) {
+        return res.json(cached);
+      }
+
       const user = await prisma.user.findUnique({
         where: { id },
         select: {
@@ -176,7 +186,9 @@ export class UserController {
         return res.status(404).json({ error: 'User not found' });
       }
 
-      res.json({ user });
+      const response = { user };
+      await userCache.set(cacheKey, response);
+      res.json(response);
     } catch (error) {
       console.error('Get user by ID error:', error);
       res.status(500).json({ error: 'Internal server error' });
@@ -271,11 +283,20 @@ export class UserController {
     try {
       const user = (req as any).user;
 
+      // Cache read-through for user preferences
+      const cacheKey = `user:${user.id}:preferences`;
+      const cached = await userCache.get<{ profile: any }>(cacheKey);
+      if (cached) {
+        return res.json(cached);
+      }
+
       const profile = await prisma.userProfile.findUnique({
         where: { userId: user.id }
       });
 
-      res.json({ profile });
+      const response = { profile };
+      await userCache.set(cacheKey, response);
+      res.json(response);
     } catch (error) {
       console.error('Get preferences error:', error);
       res.status(500).json({ error: 'Internal server error' });
