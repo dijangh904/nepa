@@ -2,12 +2,14 @@ import { Router } from "express";
 import { scheduledPaymentController } from "../controllers/ScheduledPaymentController";
 import { authenticate } from "../middleware/authentication";
 import { scheduledPaymentLimiter } from "../middleware/comprehensiveRateLimiter";
+import { sanitizeInput } from "../middleware/inputSanitization";
 
 const router = Router();
 
-// All routes require authentication and rate limiting
+// All routes require authentication, rate limiting, and input sanitization
 router.use(authenticate);
 router.use(scheduledPaymentLimiter);
+router.use(sanitizeInput);
 
 /**
  * @openapi
