@@ -4,7 +4,7 @@ import { paymentLimiter, transactionLimiter } from '../middleware/rateLimiter';
 import { conditionalCaptcha } from '../middleware/captcha';
 import { abuseDetector } from '../middleware/abuseDetection';
 import { invalidateUserCache, invalidateCacheByPattern } from '../middleware/cache';
-import { Server, TransactionBuilder, Networks, BASE_FEE, Asset, Keypair } from 'stellar-sdk';
+import { Server, TransactionBuilder, Networks, BASE_FEE, Asset, Transaction } from 'stellar-sdk';
 
 const billingService = new BillingService();
 
@@ -40,9 +40,127 @@ export const applyPaymentSecurity = [
 
 /**
  * @openapi
+ * /api/payment/prepare:
+ *   post:
+ *     summary: Prepare an unsigned Stellar payment transaction for client-side signing
+ *     description: >
+ *       Returns a base64-encoded unsigned transaction XDR that the client must sign
+ *       with their wallet (Freighter, xBull, Albedo, etc.) before submitting via
+ *       /api/payment/process. The server never receives or handles the user's secret key.
+ *     security:
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               billId:
+ *                 type: string
+ *               amount:
+ *                 type: number
+ *               sourcePublicKey:
+ *                 type: string
+ *                 description: The user's Stellar public key (G...). Never the secret key.
+ *     responses:
+ *       200:
+ *         description: Unsigned transaction XDR prepared successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 unsignedXdr:
+ *                   type: string
+ *                   description: Base64-encoded unsigned transaction XDR for client-side signing
+ *                 networkPassphrase:
+ *                   type: string
+ *       400:
+ *         description: Invalid request data
+ */
+export const prepareStellarPayment = async (req: Request, res: Response) => {
+  // SECURITY (Issue #406): This endpoint never handles secret keys. It builds an
+  // unsigned transaction that the client signs locally with their wallet, then
+  // the client returns the signed XDR via /api/payment/process for submission
+  // to the Stellar network. The user's secret key NEVER touches the server.
+  const { billId, amount, sourcePublicKey } = req.body;
+  const userId = (req as any).user?.id;
+
+  // Validate that the user is authenticated
+  if (!userId) {
+    return res.status(401).json({
+      status: 401,
+      error: 'User authentication required'
+    });
+  }
+
+  // Validate required fields — sourcePublicKey is the user's PUBLIC key only
+  if (!billId || !amount || !sourcePublicKey) {
+    return res.status(400).json({
+      status: 400,
+      error: 'Missing required fields: billId, amount, sourcePublicKey'
+    });
+  }
+
+  // Validate amount is positive
+  if (amount <= 0) {
+    return res.status(400).json({
+      status: 400,
+      error: 'Payment amount must be greater than 0'
+    });
+  }
+
+  try {
+    // Load the source account from the Stellar network using the PUBLIC key only.
+    // The server never has access to the user's secret key at any point in this flow.
+    const sourceAccount = await stellarServer.loadAccount(sourcePublicKey);
+
+    // Build an unsigned transaction — the client will sign this with their wallet
+    const transaction = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: stellarNetwork
+    })
+      .addOperation({
+        type: 'payment',
+        destination: process.env.STELLAR_MERCHANT_WALLET || 'GATESTNETACCOUNT',
+        asset: STELLAR_ASSET,
+        amount: (amount * 10000000).toString(), // Convert to stroops (7 decimal places)
+      })
+      .setTimeout(180) // Give the client 3 minutes to sign with their wallet
+      .build();
+
+    // Return the unsigned XDR for the client to sign — no secret keys involved
+    res.status(200).json({
+      status: 200,
+      message: 'Unsigned transaction prepared. Sign with your wallet and submit via /api/payment/process',
+      data: {
+        unsignedXdr: transaction.toXDR().toString('base64'),
+        networkPassphrase: stellarNetwork,
+        amount,
+        billId,
+        destination: process.env.STELLAR_MERCHANT_WALLET || 'GATESTNETACCOUNT'
+      }
+    });
+  } catch (error: any) {
+    console.error('Error preparing Stellar transaction:', error);
+    res.status(400).json({
+      status: 400,
+      error: 'Failed to prepare Stellar transaction',
+      details: error.message
+    });
+  }
+};
+
+/**
+ * @openapi
  * /api/payment/process:
  *   post:
  *     summary: Process a payment
+ *     description: >
+ *       For Stellar payments, the client must first call /api/payment/prepare to
+ *       get an unsigned XDR, sign it with their wallet, then submit the signed
+ *       XDR here. The server never receives or handles the user's secret key.
  *     security:
  *       - ApiKeyAuth: []
  *     requestBody:
@@ -58,7 +176,13 @@ export const applyPaymentSecurity = [
  *                 type: number
  *               paymentMethod:
  *                 type: string
- *                 enum: [BANK_TRANSFER, CREDIT_CARD, CRYPTO]
+ *                 enum: [BANK_TRANSFER, CREDIT_CARD, STELLAR]
+ *               signedXdr:
+ *                 type: string
+ *                 description: >
+ *                   Base64-encoded signed transaction XDR (required for STELLAR payments).
+ *                   The client signs the unsigned XDR from /api/payment/prepare
+ *                   using their wallet (Freighter, xBull, Albedo, etc.).
  *               recaptchaToken:
  *                 type: string
  *     responses:
@@ -73,7 +197,17 @@ export const processPayment = async (req: Request, res: Response) => {
   const transactionId = `txn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   
   try {
-    const { billId, amount, paymentMethod, stellarSecretKey } = req.body;
+    // SECURITY FIX (Issue #406): stellarSecretKey has been REMOVED from the
+    // request body. Instead, the client now sends a `signedXdr` — a transaction
+    // they signed locally with their wallet. The server only submits the
+    // pre-signed transaction to the Stellar network. The user's secret key
+    // NEVER touches the server.
+    //
+    // Previous (vulnerable) code:
+    //   const { billId, amount, paymentMethod, stellarSecretKey } = req.body;
+    //
+    // Fixed code:
+    const { billId, amount, paymentMethod, signedXdr } = req.body;
     const userId = (req as any).user?.id;
     
     if (!userId) {
@@ -98,6 +232,17 @@ export const processPayment = async (req: Request, res: Response) => {
       });
     }
 
+    // SECURITY (Issue #406): Reject any request that attempts to pass a secret
+    // key — this field should never be present. Log the attempt for security
+    // monitoring to detect potential attacks or misconfigured clients.
+    if (req.body.stellarSecretKey || req.body.secretKey || req.body.seed) {
+      console.warn(`[SECURITY] User ${userId} attempted to pass a secret key in payment request. This is a security violation.`);
+      return res.status(400).json({
+        status: 400,
+        error: 'Secret keys must never be sent to the server. Please sign your transaction locally with your wallet and submit the signed XDR.'
+      });
+    }
+
     // Initialize transaction status
     const transactionStatus: TransactionStatus = {
       id: transactionId,
@@ -116,8 +261,21 @@ export const processPayment = async (req: Request, res: Response) => {
 
     // Handle Stellar blockchain payments
     if (paymentMethod === 'STELLAR') {
-      if (!stellarSecretKey) {
-        throw new Error('Stellar secret key is required for Stellar payments');
+      // SECURITY FIX (Issue #406): Instead of requiring the secret key, we now
+      // require a signedXdr — a transaction that the client has already signed
+      // with their wallet (Freighter, xBull, Albedo, etc.).
+      //
+      // The new secure flow is:
+      //   1. Client calls /api/payment/prepare to get an unsigned XDR
+      //   2. Client signs the XDR with their wallet locally (secret key never leaves the client)
+      //   3. Client sends the signed XDR here for submission to the network
+      //
+      // The server NEVER sees or handles the user's secret key.
+      if (!signedXdr) {
+        return res.status(400).json({
+          status: 400,
+          error: 'Signed XDR is required for Stellar payments. Call /api/payment/prepare first, sign the transaction with your wallet, then submit the signed XDR.'
+        });
       }
 
       // Update status to processing
@@ -125,30 +283,25 @@ export const processPayment = async (req: Request, res: Response) => {
       transactionStatus.updatedAt = new Date();
 
       try {
-        const sourceKeypair = Keypair.fromSecret(stellarSecretKey);
-        const sourceAccount = await stellarServer.loadAccount(sourceKeypair.publicKey());
-        
-        // Create Stellar transaction
-        const transaction = new TransactionBuilder(sourceAccount, {
-          fee: BASE_FEE,
-          networkPassphrase: stellarNetwork
-        })
-          .addOperation({
-            type: 'payment',
-            destination: process.env.STELLAR_MERCHANT_WALLET || 'GATESTNETACCOUNT',
-            asset: STELLAR_ASSET,
-            amount: (amount * 10000000).toString(), // Convert to stroops (7 decimal places)
-          })
-          .setTimeout(30)
-          .build();
+        // Reconstruct the transaction from the client-signed XDR.
+        // The transaction is already signed by the client's wallet — the server
+        // does NOT need the user's secret key to submit it to the network.
+        const signedTransaction = new Transaction(signedXdr, stellarNetwork);
 
-        transaction.sign(sourceKeypair);
-        
-        // Submit transaction to Stellar network
-        const stellarResult = await stellarServer.submitTransaction(transaction);
+        // SECURITY: Verify the transaction has at least one signature before
+        // submitting. This ensures the client actually signed it with their
+        // wallet and didn't send an unsigned XDR.
+        if (!signedTransaction.signatures || signedTransaction.signatures.length === 0) {
+          throw new Error('Transaction has no signatures — the client must sign the XDR with their wallet before submitting');
+        }
+
+        // Submit the pre-signed transaction to the Stellar network.
+        // The server does not sign anything — it only relays the client's
+        // already-signed transaction to the Stellar horizon server.
+        const stellarResult = await stellarServer.submitTransaction(signedTransaction);
         stellarTransactionId = stellarResult.hash;
         
-        // Verify transaction was successful
+        // Verify transaction was successful on the network
         const transactionRecord = await stellarServer.transactions()
           .transaction(stellarTransactionId)
           .call();
