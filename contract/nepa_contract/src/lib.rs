@@ -50,26 +50,46 @@ impl NepaBillingContract {
         // 1. Verify the user authorized this payment
         from.require_auth();
 
+        // SECURITY (Issue #411): Validate amount is positive before processing
+        if amount <= 0 {
+            return Err("Amount must be greater than 0".to_string());
+        }
+
         // 2. Get exchange rate if needed
         let mut final_amount = amount;
+        let mut used_fallback = false;
         if use_exchange_rate {
             let exchange_rate_id = format!("{}_USD", currency);
-            let price_feed = OracleManager::get_price_feed(env.clone(), exchange_rate_id)
-                .ok_or("Exchange rate not available")?;
 
-            // Validate price feed reliability
-            let config: OracleConfig = env
-                .storage()
-                .instance()
-                .get(&symbol_short!("OR_CONF"))
-                .ok_or("Oracle not initialized")?;
+            // SECURITY (Issue #411): Use the new get_price_with_fallback method
+            // instead of calling get_price_feed directly. This method implements
+            // the full fallback chain:
+            //   1. Check for admin manual override (emergency)
+            //   2. Try live oracle price (if circuit breaker is closed)
+            //   3. Validate price deviation (prevent manipulation)
+            //   4. Fall back to cached price (if fallback is enabled)
+            //   5. Return error only if all methods fail
+            //
+            // Previous (vulnerable) code:
+            //   let price_feed = OracleManager::get_price_feed(env.clone(), exchange_rate_id)
+            //       .ok_or("Exchange rate not available")?;
+            //   if price_feed.reliability_score < config.min_reliability_score {
+            //       return Err("Price feed reliability too low".to_string());
+            //   }
+            //   final_amount = (amount * price_feed.price) / (10_i128.pow(price_feed.decimals));
+            //
+            // Fixed code:
+            let max_deviation = 20; // Reject prices that deviate more than 20% from the last known price
+            let (price, decimals, fallback) = OracleManager::get_price_with_fallback(
+                env.clone(),
+                exchange_rate_id,
+                max_deviation,
+            )?;
 
-            if price_feed.reliability_score < config.min_reliability_score {
-                return Err("Price feed reliability too low".to_string());
-            }
+            used_fallback = fallback;
 
-            // Convert amount using exchange rate (assuming price is in USD)
-            final_amount = (amount * price_feed.price) / (10_i128.pow(price_feed.decimals));
+            // Convert amount using exchange rate
+            final_amount = (amount * price) / (10_i128.pow(decimals));
         }
 
         // 3. Initialize the Token client
@@ -124,10 +144,18 @@ impl NepaBillingContract {
         let mut final_amount = subtotal;
         if utility_rate.currency != currency {
             let exchange_rate_id = format!("{}_{}", utility_rate.currency, currency);
-            let price_feed = OracleManager::get_price_feed(env.clone(), exchange_rate_id)
-                .ok_or("Exchange rate not available")?;
 
-            final_amount = (subtotal * price_feed.price) / (10_i128.pow(price_feed.decimals));
+            // SECURITY (Issue #411): Use fallback-enabled price retrieval
+            // instead of calling get_price_feed directly. This ensures
+            // payments can continue even when the oracle is temporarily down.
+            let max_deviation = 20;
+            let (price, decimals, _fallback) = OracleManager::get_price_with_fallback(
+                env.clone(),
+                exchange_rate_id,
+                max_deviation,
+            )?;
+
+            final_amount = (subtotal * price) / (10_i128.pow(decimals));
         }
 
         // 6. Process payment
@@ -222,6 +250,41 @@ impl NepaBillingContract {
 
     pub fn get_oracle_stats(env: Env) -> (oracle::OracleCost, oracle::OracleReliability, u8) {
         OracleManager::get_oracle_stats(env)
+    }
+
+    // === ORACLE FALLBACK MANAGEMENT (Issue #411) ===
+
+    /// SECURITY (Issue #411): Set a manual price override for a feed.
+    /// Admin-only emergency function. The override takes priority over
+    /// both live and fallback prices.
+    pub fn set_oracle_manual_override(
+        env: Env,
+        admin: Address,
+        feed_id: String,
+        price: i128,
+        decimals: u32,
+        expires_at: u64,
+    ) {
+        OracleManager::set_manual_override(env, admin, feed_id, price, decimals, expires_at);
+    }
+
+    /// SECURITY (Issue #411): Remove a manual price override.
+    pub fn remove_oracle_manual_override(env: Env, admin: Address, feed_id: String) {
+        OracleManager::remove_manual_override(env, admin, feed_id);
+    }
+
+    /// SECURITY (Issue #411): Check if the oracle circuit breaker is in fallback mode.
+    /// Returns true if the circuit is OPEN (using cached/fallback prices).
+    pub fn is_oracle_in_fallback_mode(env: Env) -> bool {
+        OracleManager::is_fallback_mode(&env)
+    }
+
+    /// SECURITY (Issue #411): Get the current circuit breaker state.
+    /// Returns (state, consecutive_failures, failure_threshold).
+    /// state: 0=CLOSED, 1=OPEN, 2=HALF_OPEN
+    pub fn get_circuit_breaker_status(env: Env) -> (u8, u32, u32) {
+        let breaker = OracleManager::get_circuit_breaker_status_internal(&env);
+        (breaker.state, breaker.consecutive_failures, breaker.failure_threshold)
     }
 
     pub fn should_update_oracles(env: Env) -> (bool, bool) {
@@ -428,10 +491,17 @@ impl NepaBillingContract {
         let mut final_amount = subtotal;
         if config.currency != currency {
             let exchange_rate_id = format!("{}_{}", config.currency, currency);
-            let price_feed = OracleManager::get_price_feed(env.clone(), exchange_rate_id)
-                .ok_or("Exchange rate not available")?;
 
-            final_amount = (subtotal * price_feed.price) / (10_i128.pow(price_feed.decimals));
+            // SECURITY (Issue #411): Use fallback-enabled price retrieval
+            // to ensure multi-utility payments work during oracle downtime.
+            let max_deviation = 20;
+            let (price, decimals, _fallback) = OracleManager::get_price_with_fallback(
+                env.clone(),
+                exchange_rate_id,
+                max_deviation,
+            )?;
+
+            final_amount = (subtotal * price) / (10_i128.pow(decimals));
         }
 
         // 11. Validate payment limits
